@@ -1,2 +1,7 @@
 docs/
 .venv/
+__pycache__
+*.log
+logs/
+test.ipynb
+.env

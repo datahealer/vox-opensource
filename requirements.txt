@@ -3,3 +3,10 @@
 torch
 torchvision
 torchaudio
+fastapi
+transformers
+uvicorn
+python-dotenv
+accelerate
+"uvicorn[standard]"
+websockets
