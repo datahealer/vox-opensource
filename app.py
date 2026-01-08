@@ -1,12 +1,19 @@
 
 from fastapi import FastAPI
-from services.llm.registry import lamma_malverick,qwen
-from routes.llm.lamma_malverick_router import router as lammaMaverickRouter
-from routes.llm.qwen_route import router as qwenRouter
 from core.logger import setup_logger
 from fastapi.middleware.cors import CORSMiddleware
+# from services.llm_service import set_llm_service,get_llm_service
+from services.tts_service import set_tts_service
+from services.stt_service import set_stt_service
+# from routes.llm_router import router as llm_router
+from routes.tts_router import router as tts_router
+from routes.stt_router import router as stt_router
 
 logger = setup_logger("vox.app")
+
+# set_llm_service("qwen")
+set_tts_service("xtts")
+set_stt_service("faster_whisper")
 
 app = FastAPI()
 
@@ -17,15 +24,17 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-app.include_router(lammaMaverickRouter,prefix="/lammaMaverick")
-app.include_router(
-    qwenRouter,
-    prefix="/qwen",
-    tags=["Qwen LLM"],
-)
+
+# app.include_router(llm_router, prefix="/llm")
+app.include_router(tts_router, prefix="/tts")
+app.include_router(stt_router, prefix="/stt")
 
 @app.on_event("startup")
 def startup():
     logger.info("🚀 Vox starting")
-    # lamma_malverick.load()
-    qwen.load()
+    # llm_service = get_llm_service()
+    # model_id = llm_service.MODEL_ID
+    # logger.info("llm service INITIALIZED %s", model_id)
+    # llm_service.load()
+    # logger.info("Llm service LOADED %s", model_id)
+    

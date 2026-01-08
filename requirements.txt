@@ -8,5 +8,7 @@ transformers
 uvicorn
 python-dotenv
 accelerate
-"uvicorn[standard]"
 websockets
+TTS
+torchcodec
+faster-whisper
