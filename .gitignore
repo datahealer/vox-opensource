@@ -1,6 +1,7 @@
 docs/
 .venv/
 .venv310/
+venv310/
 __pycache__
 *.log
 logs/

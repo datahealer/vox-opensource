@@ -12,3 +12,13 @@ websockets
 TTS
 torchcodec
 faster-whisper
+
+
+## venv310
+faster-whisper==1.2.1
+TTS
+fastapi
+uvicorn
+transformers==4.30.2
+websockets
+torchcodec

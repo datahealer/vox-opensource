@@ -1,4 +1,8 @@
-from services.registry import lamma_malverick,qwen
+from llm_services.lamma_malverick_service import LammaMaverick
+from llm_services.Qwen2_5_service import QwenService
+
+lamma_malverick = LammaMaverick()
+qwen = QwenService()
 
 _services = {
     "lammaMaverick": lamma_malverick,

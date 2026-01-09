@@ -48,12 +48,11 @@ class QwenService:
 
     # ---------- STREAM ----------
     def generate_stream(
-        self,
-        session: LLMSession,
-        prompt: str,
-        **kwargs,
-    ) -> Generator[str, None, None]:
-
+    self,
+    session: LLMSession,
+    messages: list,
+    **kwargs,
+    ):
         self._ensure_loaded()
         cfg = self._merge_cfg(kwargs)
 
@@ -63,7 +62,7 @@ class QwenService:
             skip_special_tokens=True,
         )
 
-        inputs = self._prepare_inputs(prompt)
+        inputs = self._prepare_inputs_from_messages(messages)
 
         generation_kwargs = dict(
             **inputs,
@@ -79,8 +78,6 @@ class QwenService:
                 if session.cancel_event.is_set():
                     return
                 self.model.generate(**generation_kwargs)
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
 
         threading.Thread(target=_run, daemon=True).start()
 
@@ -88,6 +85,7 @@ class QwenService:
             if session.cancel_event.is_set():
                 break
             yield token
+
 
     # ---------- NON-STREAM ----------
     def generate(self, prompt: str, **kwargs) -> str:
@@ -109,6 +107,7 @@ class QwenService:
         output_ids = output_ids[:, inputs["input_ids"].shape[1]:]
         return self.tokenizer.decode(output_ids[0], skip_special_tokens=True)
 
+
     # ---------- HELPERS ----------
     def _prepare_inputs(self, prompt: str):
         messages = [
@@ -124,6 +123,15 @@ class QwenService:
 
         inputs = self.tokenizer(text, return_tensors="pt")
         return {k: v.to(self.model.device) for k, v in inputs.items()}
+    
+    def _prepare_inputs_from_messages(self, messages):
+        text = self.tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        inputs = self.tokenizer(text, return_tensors="pt")
+        return {k: v.to(self.model.device) for k, v in inputs.items()}
 
     def _merge_cfg(self, kwargs):
         return {
@@ -136,51 +144,3 @@ class QwenService:
         if not self.model or not self.tokenizer:
             raise RuntimeError("Model not loaded")
 
-
-# def generate_stream(
-#     self,
-#     session: LLMSession,
-#     messages: list,
-#     **kwargs,
-# ):
-#     self._ensure_loaded()
-#     cfg = self._merge_cfg(kwargs)
-
-#     streamer = TextIteratorStreamer(
-#         self.tokenizer,
-#         skip_prompt=True,
-#         skip_special_tokens=True,
-#     )
-
-#     inputs = self._prepare_inputs_from_messages(messages)
-
-#     generation_kwargs = dict(
-#         **inputs,
-#         streamer=streamer,
-#         max_new_tokens=cfg["max_new_tokens"],
-#         temperature=cfg["temperature"],
-#         top_p=cfg["top_p"],
-#         do_sample=True,
-#     )
-
-#     def _run():
-#         with generation_lock:
-#             if session.cancel_event.is_set():
-#                 return
-#             self.model.generate(**generation_kwargs)
-
-#     threading.Thread(target=_run, daemon=True).start()
-
-#     for token in streamer:
-#         if session.cancel_event.is_set():
-#             break
-#         yield token
-
-# def _prepare_inputs_from_messages(self, messages):
-#     text = self.tokenizer.apply_chat_template(
-#         messages,
-#         tokenize=False,
-#         add_generation_prompt=True,
-#     )
-#     inputs = self.tokenizer(text, return_tensors="pt")
-#     return {k: v.to(self.model.device) for k, v in inputs.items()}
