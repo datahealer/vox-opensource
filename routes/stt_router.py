@@ -23,18 +23,31 @@ async def stt_stream(ws: WebSocket):
 
     try:
         while True:
-            # Try to receive either JSON (commands) or binary (audio frames)
-            is_json = False
+            # Use receive() to get either text or binary message
             try:
-                msg = await ws.receive_json()
-                is_json = True
-            except json.JSONDecodeError:
-                pass
+                message = await ws.receive()
+                logger.debug(f"STT received message: {list(message.keys())}")
             except Exception as e:
-                logger.debug(f"STT receive error: {type(e).__name__}")
+                logger.debug(f"STT receive error: {type(e).__name__}: {e}")
                 continue
 
-            if is_json:
+            # Handle binary audio frames
+            if "bytes" in message:
+                data = message["bytes"]
+                logger.debug(f"STT received binary frame: {len(data)} bytes")
+                # Convert binary PCM16 to float32 and append to buffer
+                chunk = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
+                audio_buffer = np.concatenate([audio_buffer, chunk])
+                continue
+
+            # Handle JSON messages
+            if "text" in message:
+                try:
+                    msg = json.loads(message["text"])
+                except json.JSONDecodeError:
+                    logger.debug("Received invalid JSON")
+                    continue
+
                 # Handle JSON command messages
                 msg_type = msg.get("type")
                 event = msg.get("event")
@@ -42,6 +55,13 @@ async def stt_stream(ws: WebSocket):
 
                 if event == "init":
                     logger.info(f"STT init received (session_id={session_id})")
+                    # Acknowledge init message
+                    try:
+                        await ws.send_json({"event": "init_ack"})
+                        logger.debug(f"STT init_ack sent")
+                    except Exception as e:
+                        logger.error(f"Failed to send init_ack: {e}")
+                        break
                     continue
 
                 if msg_type == "audio_chunk" or event == "audio_chunk":
@@ -59,10 +79,8 @@ async def stt_stream(ws: WebSocket):
                     processed_samples = 0
                     async for result in stt_service.transcribe_stream(audio_buffer):
                         await ws.send_json({
-                            "type": "transcript",
-                            "text": result["text"],
-                            "is_final": result["is_final"],
-                            "confidence": result["confidence"]
+                            "event": "transcript",
+                            "text": result["text"]
                         })
                         # Track how much we've processed
                         processed_samples += stt_service.chunk_samples
@@ -78,35 +96,20 @@ async def stt_stream(ws: WebSocket):
                         result = stt_service.process_remaining(audio_buffer)
                         if result:
                             await ws.send_json({
-                                "type": "transcript",
-                                "text": result["text"],
-                                "is_final": True,
-                                "confidence": result["confidence"]
+                                "event": "transcript",
+                                "text": result["text"]
                             })
 
-                    await ws.send_json({"type": "complete"})
+                    await ws.send_json({"event": "done"})
                     break
 
                 elif msg_type == "cancel" or event == "cancel":
                     logger.info(f"STT cancel received: reason={msg.get('reason', 'unknown')}")
                     await ws.send_json({
-                        "type": "cancelled",
-                        "reason": msg.get("reason", "unknown")
+                        "event": "cancel_ack"
                     })
                     break
 
-            else:
-                # Binary frame: audio data
-                try:
-                    data = await ws.receive_bytes()
-                    logger.debug(f"STT received binary frame: {len(data)} bytes")
-                    # Convert binary PCM16 to float32 and append to buffer
-                    chunk = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
-                    audio_buffer = np.concatenate([audio_buffer, chunk])
-                    # Don't transcribe yet; wait for end_stream or timeout
-                except Exception as e:
-                    logger.debug(f"STT binary receive error: {type(e).__name__}")
-                    continue
 
     except WebSocketDisconnect:
         logger.debug("STT client disconnected")
