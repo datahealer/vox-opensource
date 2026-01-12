@@ -6,7 +6,7 @@ import numpy as np
 
 router = APIRouter()
 
-@router.websocket("/stream/ws")
+@router.websocket("/stream")
 async def stt_stream(ws: WebSocket):
     from services.stt_service import get_stt_service
     stt_service = get_stt_service()

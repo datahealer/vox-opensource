@@ -12,3 +12,12 @@ websockets
 TTS
 torchcodec
 faster-whisper
+
+# for tts and stt
+faster-whisper==1.2.1
+TTS
+fastapi
+uvicorn
+transformers==4.30.2
+websockets
+torchcodec

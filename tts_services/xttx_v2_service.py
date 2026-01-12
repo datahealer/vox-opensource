@@ -17,7 +17,6 @@ torch.serialization.add_safe_globals([
 ])
 
 
-
 SAMPLE_RATE = 24000
 CHUNK_MS = 100
 
