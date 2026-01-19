@@ -33,34 +33,54 @@ import websockets
 import json
 
 async def test_stream():
-    url = "ws://127.0.0.1:8000/llm/stream/ws"
+    session_id = "test-session-123"
+    url = f"ws://127.0.0.1:8000/llm/stream?session_id={session_id}"
 
     async with websockets.connect(url) as ws:
+        # Send init message first
         await ws.send(json.dumps({
-            "type": "request",
-            "session_id": "sess123",
-            "messages": [
-                {"role": "user", "content": "Hello, can you explain quantum physics in simple terms?"}
-            ],
-            "max_new_tokens": 50
+            "event": "init",
+            "call_session_id": session_id,
+            "service_type": "llm"
         }))
 
-        print("Streaming response:\n")
+        # Wait for init_ack
+        msg = await ws.recv()
+        init_ack = json.loads(msg)
+        print(f"Received: {init_ack}")
+
+        # Send generate request
+        await ws.send(json.dumps({
+            "event": "generate",
+            "messages": [
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": "Hello, can you explain quantum physics in simple terms?"}
+            ],
+            "max_tokens": 100
+        }))
+
+        print("\nStreaming response:\n")
+        token_count = 0
 
         while True:
             try:
                 msg = await ws.recv()
                 data = json.loads(msg)
+                event = data.get("event")
 
-                if data["type"] == "token":
-                    if data.get("is_final"):
-                        print("\n\n✅ Stream ended")
-                        break
-
+                if event == "token":
+                    token_count += 1
                     print(data["text"], end="", flush=True)
 
-                elif data["type"] == "error":
-                    print("\n❌ Error:", data["message"])
+                elif event == "done":
+                    print(f"\n\n✅ Stream ended")
+                    print(f"Total tokens: {data.get('total_tokens')}")
+                    print(f"Finish reason: {data.get('finish_reason')}")
+                    break
+
+                elif event == "error":
+                    print(f"\n❌ Error: {data.get('message')}")
+                    print(f"Error code: {data.get('error_code')}")
                     break
 
             except websockets.ConnectionClosed:

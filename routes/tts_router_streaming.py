@@ -1,31 +1,37 @@
 import asyncio
-import base64
 import json
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from core.logger import setup_logger
-from tts_services.xttx_v2_service import SAMPLE_RATE
+from tts_services.xttx_v2_streaming_service import XTTSStreamingService, SAMPLE_RATE
 
 router = APIRouter()
-logger = setup_logger("tts_router")
+logger = setup_logger("tts_router_streaming")
 
-def pcm16_to_base64(pcm: bytes) -> str:
-    return base64.b64encode(pcm).decode("utf-8")
+# Initialize streaming TTS service (singleton)
+_tts_service = None
+
+
+def get_streaming_tts_service():
+    global _tts_service
+    if _tts_service is None:
+        logger.info("Initializing XTTS Streaming Service (first access)...")
+        _tts_service = XTTSStreamingService()
+    return _tts_service
 
 
 @router.websocket("/stream")
 async def tts_stream(ws: WebSocket):
-    from services.tts_service import get_tts_service
-    tts_service = get_tts_service()
+    tts_service = get_streaming_tts_service()
 
     await ws.accept()
     cancel_event = asyncio.Event()
     bytes_generated = 0
     session_id = ws.query_params.get("session_id")
-    current_task = None  # Track the current synthesis task
+    current_task = None
     client_addr = ws.client.host if ws.client else "unknown"
 
     if session_id:
-        logger.info(f"TTS WS connected, session_id={session_id}, client={client_addr}")
+        logger.info(f"TTS Streaming WS connected, session_id={session_id}, client={client_addr}")
 
     try:
         while True:
@@ -53,7 +59,7 @@ async def tts_stream(ws: WebSocket):
                 event = "cancel"
 
             if event == "init":
-                logger.info(f"TTS init received (session_id={session_id})")
+                logger.info(f"TTS Streaming init received (session_id={session_id})")
                 # No-op for now; keep connection warm
                 continue
 
@@ -63,15 +69,16 @@ async def tts_stream(ws: WebSocket):
                 lang_in = msg.get("language") or msg.get("locale")
                 if isinstance(lang_in, str) and "-" in lang_in:
                     lang_in = lang_in.split("-")[0].lower()
-                language = (lang_in or "en")
+                language = lang_in or "en"
                 speed = msg.get("speed", 1.0)
 
                 logger.info(
-                    f"TTS synthesize: text_length={len(text)}, voice={voice}, language={language}, speed={speed}"
+                    f"TTS Streaming synthesize: text_length={len(text)}, voice={voice}, language={language}, speed={speed}"
                 )
 
                 async def run():
                     nonlocal bytes_generated
+                    bytes_generated = 0  # Reset for this synthesis
                     frame_count = 0
                     try:
                         async for pcm in tts_service.stream(
@@ -103,16 +110,21 @@ async def tts_stream(ws: WebSocket):
                             except Exception:
                                 duration = None
 
-                            logger.info(f"TTS done: {frame_count} frames, {bytes_generated} bytes, duration={duration}s")
+                            logger.info(
+                                f"TTS Streaming done: {frame_count} frames, {bytes_generated} bytes, duration={duration}s"
+                            )
                             try:
-                                await ws.send_json({
-                                    "event": "done",
-                                    "duration": duration,
-                                })
+                                await ws.send_json(
+                                    {
+                                        "event": "done",
+                                        "duration": duration,
+                                    }
+                                )
+                                logger.info(f"✅ TTS Streaming done event sent successfully (session_id={session_id}, duration={duration}s)")
                             except Exception as e:
                                 logger.warning(f"TTS failed to send done event: {e}")
                     except Exception as e:
-                        logger.error(f"TTS synthesis error: {e}", exc_info=True)
+                        logger.error(f"TTS streaming synthesis error: {e}", exc_info=True)
 
                 # Cancel any previous task
                 if current_task and not current_task.done():
@@ -123,7 +135,6 @@ async def tts_stream(ws: WebSocket):
                     except asyncio.TimeoutError:
                         current_task.cancel()
                     cancel_event.clear()
-                    bytes_generated = 0
 
                 current_task = asyncio.create_task(run())
                 continue
@@ -150,7 +161,7 @@ async def tts_stream(ws: WebSocket):
             logger.warning(f"TTS received unknown event: {event} (raw={msg})")
 
     except WebSocketDisconnect as e:
-        close_code = getattr(e, 'code', None)
+        close_code = getattr(e, "code", None) or 0
         close_reason = {
             1000: "normal closure (Server intentionally closed)",
             1001: "going away",
@@ -159,7 +170,9 @@ async def tts_stream(ws: WebSocket):
             1006: "abnormal closure (network/crash)",
             1011: "server error",
         }.get(close_code, f"unknown code {close_code}")
-        logger.info(f"TTS WS disconnected by client (session_id={session_id}, code={close_code}, reason={close_reason})")
+        logger.info(
+            f"TTS Streaming WS disconnected by client (session_id={session_id}, code={close_code}, reason={close_reason})"
+        )
         cancel_event.set()
         # Wait for any running task to finish
         if current_task and not current_task.done():
@@ -168,7 +181,7 @@ async def tts_stream(ws: WebSocket):
             except asyncio.TimeoutError:
                 current_task.cancel()
     except Exception as e:
-        logger.error(f"TTS error: {e}", exc_info=True)
+        logger.error(f"TTS Streaming error: {e}", exc_info=True)
     finally:
         # Ensure cleanup
         cancel_event.set()
@@ -178,4 +191,4 @@ async def tts_stream(ws: WebSocket):
                 await current_task
             except asyncio.CancelledError:
                 pass
-        logger.info(f"TTS WS closed (session_id={session_id}, client={client_addr})")
+        logger.info(f"TTS Streaming WS closed (session_id={session_id}, client={client_addr})")
