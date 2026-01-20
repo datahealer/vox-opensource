@@ -19,6 +19,14 @@ def get_streaming_tts_service():
     return _tts_service
 
 
+@router.get("/health")
+def health():
+    return {
+        "status": "ok",
+        "service": "xtts_v2_streaming",
+        "sample_rate": SAMPLE_RATE,
+    }
+
 @router.websocket("/stream")
 async def tts_stream(ws: WebSocket):
     tts_service = get_streaming_tts_service()

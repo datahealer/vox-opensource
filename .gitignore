@@ -8,3 +8,4 @@ logs/
 test.ipynb
 .env
 .venv-audio
+stt_incoming_audio/

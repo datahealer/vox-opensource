@@ -14,7 +14,7 @@ def health():
     llm_service = get_llm_service()
     return {
         "status": "ok",
-        "model": llm_service.model_name,
+        "model": llm_service.MODEL_ID,
         "active_sessions": len(llm_session_manager.sessions),
     }
 
@@ -226,7 +226,7 @@ async def generate_stream_ws(ws: WebSocket):
                 await ws.close(code=1000)
             except RuntimeError:
                 pass
-        
+
         logger.info(f"LLM WS session cleanup complete (session_id={session_id})")
 
 

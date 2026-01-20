@@ -8,6 +8,16 @@ from core.logger import setup_logger
 router = APIRouter()
 logger = setup_logger("stt_router")
 
+@router.get("/health")
+def health():
+    from services.stt_service import get_stt_service
+    stt_service = get_stt_service()
+    return {
+        "status": "ok",
+        "service": "faster_whisper",
+        "model_size": getattr(stt_service, 'model_size', 'unknown'),
+    }
+
 @router.websocket("/stream")
 async def stt_stream(ws: WebSocket):
     from services.stt_service import get_stt_service
@@ -143,7 +153,7 @@ async def stt_stream(ws: WebSocket):
                     if not chunk_id:
                         logger.error(f"[audio_chunk #{audio_chunk_count}] Missing chunk_id")
                         continue
-                    
+
                     logger.info(f"[audio_chunk #{audio_chunk_count}] Received: chunk_id={chunk_id}, is_final={is_final}, "
                                f"audio_bytes={len(b64_audio) if b64_audio else 0}")
 
