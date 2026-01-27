@@ -57,24 +57,41 @@ async def generate_stream_ws(ws: WebSocket):
     initialized = False
 
     try:
-        # Handle init message first
+        # Handle init message first (required by protocol)
         data = await ws.receive_json()
         logger.info("LLM WS received: %s", data.keys())
 
         event = data.get("event")
 
-        if event == "init":
-            initialized = True
-            logger.info(f"LLM init received (session_id={session_id})")
-            try:
-                await ws.send_json({"event": "init_ack"})
-                logger.info("LLM init_ack sent, waiting for generate request")
-            except Exception as e:
-                logger.error(f"LLM init_ack failed (session_id={session_id}): {e}")
-                return
-        else:
-            # If client skipped init, treat this as first event in loop
-            logger.warning(f"LLM WS: First message was not init (event={event}), proceeding anyway")
+        if event != "init":
+            logger.error(f"LLM WS: First message must be init, got event={event}")
+            await ws.send_json({
+                "event": "error",
+                "message": "first message must be init",
+                "error_code": "invalid_request",
+            })
+            await ws.close(code=1003, reason="init required")
+            return
+
+        call_session_id = data.get("call_session_id")
+        service_type = data.get("service_type")
+        if not call_session_id or service_type != "llm":
+            await ws.send_json({
+                "event": "error",
+                "message": "invalid init payload",
+                "error_code": "invalid_request",
+            })
+            await ws.close(code=1003, reason="invalid init")
+            return
+
+        initialized = True
+        logger.info(f"LLM init received (session_id={session_id}, call_session_id={call_session_id})")
+        try:
+            await ws.send_json({"event": "init_ack"})
+            logger.info("LLM init_ack sent, waiting for generate request")
+        except Exception as e:
+            logger.error(f"LLM init_ack failed (session_id={session_id}): {e}")
+            return
 
         # Main loop: allow multiple generate turns per connection
         while True:
@@ -91,26 +108,42 @@ async def generate_stream_ws(ws: WebSocket):
                 if event == "generate":
                     # Per-turn state reset
                     tokens_generated = 0
+                    turn_started = ws.application_state if False else None
+                    import time
+                    start_time = time.time()
 
                     # Cleanup any previous session before creating a new one
                     if session:
                         llm_session_manager.cleanup(session.session_id)
                         session = None
 
+                    request_id = data.get("request_id")
                     messages = data.get("messages", [])
                     max_tokens = data.get("max_tokens", 1024)
                     agent_id = data.get("agent_id")
+
+                    if request_id is None:
+                        logger.error("LLM generate: Missing request_id")
+                        await ws.send_json({
+                            "event": "error",
+                            "message": "Missing request_id",
+                            "error_code": "invalid_request",
+                        })
+                        continue
 
                     if not messages:
                         logger.error("LLM generate: Empty messages array")
                         await ws.send_json({
                             "event": "error",
                             "message": "Empty messages array",
-                            "error_code": "invalid_request"
+                            "error_code": "invalid_request",
+                            "request_id": request_id,
                         })
                         continue
 
-                    logger.info(f"LLM generating for session_id={session_id}, messages={len(messages)}, max_tokens={max_tokens}")
+                    logger.info(
+                        f"LLM generating for session_id={session_id}, request_id={request_id}, messages={len(messages)}, max_tokens={max_tokens}, agent_id={agent_id}"
+                    )
 
                     session = llm_session_manager.create(session_id)
 
@@ -135,7 +168,8 @@ async def generate_stream_ws(ws: WebSocket):
                             tokens_generated += 1
                             await ws.send_json({
                                 "event": "token",
-                                "text": token
+                                "text": token,
+                                "request_id": request_id,
                             })
 
                         if session.cancel_event.is_set():
@@ -143,11 +177,16 @@ async def generate_stream_ws(ws: WebSocket):
                             continue
 
                         # Send done event
-                        logger.info(f"LLM generation complete (session_id={session_id}, tokens={tokens_generated})")
+                        duration_ms = int((time.time() - start_time) * 1000)
+                        logger.info(
+                            f"LLM generation complete (session_id={session_id}, request_id={request_id}, tokens={tokens_generated}, duration_ms={duration_ms})"
+                        )
                         await ws.send_json({
                             "event": "done",
+                            "request_id": request_id,
                             "total_tokens": tokens_generated,
-                            "finish_reason": "stop"
+                            "duration_ms": duration_ms,
+                            "finish_reason": "stop",
                         })
 
                     except Exception as e:
@@ -155,7 +194,8 @@ async def generate_stream_ws(ws: WebSocket):
                         await ws.send_json({
                             "event": "error",
                             "message": str(e),
-                            "error_code": "model_error"
+                            "error_code": "model_error",
+                            "request_id": request_id,
                         })
 
                     finally:
@@ -171,7 +211,8 @@ async def generate_stream_ws(ws: WebSocket):
                     await ws.send_json({
                         "event": "cancel_ack",
                         "tokens_generated": tokens_generated,
-                        "finish_reason": "cancel"
+                        "finish_reason": "cancel",
+                        "request_id": data.get("request_id"),
                     })
 
                 else:

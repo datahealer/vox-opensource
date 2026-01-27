@@ -1,5 +1,8 @@
 import asyncio
 import json
+import os
+from pathlib import Path
+from datetime import datetime
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from core.logger import setup_logger
 from tts_services.xttx_v2_streaming_service import XTTSStreamingService, SAMPLE_RATE
@@ -7,8 +10,73 @@ from tts_services.xttx_v2_streaming_service import XTTSStreamingService, SAMPLE_
 router = APIRouter()
 logger = setup_logger("tts_router_streaming")
 
+# ──────────────────────────────────────────────────────────────────────────
+# TTS Debug Logger (non-blocking, independent of core flow)
+# ──────────────────────────────────────────────────────────────────────────
+DEBUG_TTS_RESPONSES = os.getenv("DEBUG_TTS_RESPONSES", "true").lower() == "true"
+DEBUG_TTS_DIR = Path("tts_debug_responses")
+if DEBUG_TTS_RESPONSES:
+    DEBUG_TTS_DIR.mkdir(exist_ok=True)
+    logger.info(f"[TTS Debug] Enabled: responses will be saved to {DEBUG_TTS_DIR}")
+
+# Async queue for non-blocking writes
+_tts_debug_queue = asyncio.Queue() if DEBUG_TTS_RESPONSES else None
+_tts_debug_writer_task = None
+
+async def _tts_debug_writer():
+    """Background task: write TTS responses to disk without blocking main flow."""
+    if not DEBUG_TTS_RESPONSES:
+        return
+
+    logger.info("[TTS Debug] Writer thread started")
+    while True:
+        try:
+            item = await _tts_debug_queue.get()
+            if item is None:  # Shutdown signal
+                logger.info("[TTS Debug] Writer thread shutting down")
+                break
+
+            synthesis_id, chunk_idx, chunk_data, metadata = item
+
+            # Create session directory
+            session_dir = DEBUG_TTS_DIR / f"synthesis_{synthesis_id}"
+            session_dir.mkdir(exist_ok=True)
+
+            # Write audio chunk
+            if chunk_idx >= 0:
+                chunk_file = session_dir / f"chunk_{chunk_idx:03d}.pcm16"
+                chunk_file.write_bytes(chunk_data)
+
+            # Write metadata on first chunk
+            if chunk_idx == -1 and metadata:
+                meta_file = session_dir / "metadata.json"
+                meta_file.write_text(json.dumps(metadata, indent=2))
+
+        except Exception as e:
+            logger.warning(f"[TTS Debug] Writer error: {e}")
+
+async def _ensure_debug_writer():
+    """Ensure background writer task is running."""
+    global _tts_debug_writer_task
+    if DEBUG_TTS_RESPONSES and (_tts_debug_writer_task is None or _tts_debug_writer_task.done()):
+        _tts_debug_writer_task = asyncio.create_task(_tts_debug_writer())
+        logger.info("[TTS Debug] Writer task created")
+
+def _queue_tts_debug(synthesis_id: int, chunk_idx: int, chunk_data: bytes, metadata: dict = None):
+    """Queue a TTS response chunk for debug logging (non-blocking)."""
+    if DEBUG_TTS_RESPONSES and _tts_debug_queue:
+        try:
+            _tts_debug_queue.put_nowait((synthesis_id, chunk_idx, chunk_data, metadata))
+        except asyncio.QueueFull:
+            logger.warning(f"[TTS Debug] Queue full, dropping chunk {chunk_idx}")
+
+# ──────────────────────────────────────────────────────────────────────────
 # Initialize streaming TTS service (singleton)
 _tts_service = None
+
+SUPPORTED_VOICES = {"nova", "alloy", "echo", "fable", "onyx", "shimmer"}
+MIN_SPEED = 0.25
+MAX_SPEED = 4.0
 
 
 def get_streaming_tts_service():
@@ -44,7 +112,24 @@ async def tts_stream(ws: WebSocket):
     try:
         while True:
             try:
-                msg = await ws.receive_json()
+                raw = await ws.receive()
+                # Handle explicit disconnect/control frames
+                if set(["type", "code", "reason"]).issubset(raw.keys()):
+                    logger.info(f"TTS disconnect/control: {raw}")
+                    raise WebSocketDisconnect(code=raw.get("code", 1000))
+
+                if "text" in raw:
+                    try:
+                        msg = json.loads(raw["text"])
+                    except json.JSONDecodeError:
+                        logger.warning("Received invalid JSON on TTS WebSocket")
+                        continue
+                elif "bytes" in raw:
+                    logger.warning("Binary message received on TTS control channel; ignoring")
+                    continue
+                else:
+                    logger.warning(f"Unknown message envelope on TTS WebSocket: {raw}")
+                    continue
             except json.JSONDecodeError:
                 logger.warning("Received invalid JSON on TTS WebSocket")
                 continue
@@ -68,26 +153,81 @@ async def tts_stream(ws: WebSocket):
 
             if event == "init":
                 logger.info(f"TTS Streaming init received (session_id={session_id})")
-                # No-op for now; keep connection warm
+                try:
+                    await ws.send_json({"event": "init_ack"})
+                except Exception as e:
+                    logger.warning(f"Failed to send init_ack: {e}")
                 continue
 
             if event == "synthesize":
+                synthesis_id = msg.get("synthesis_id")
                 text = msg.get("text") or msg.get("payload") or ""
-                voice = msg.get("voice")
+                voice = msg.get("voice") or "nova"
                 lang_in = msg.get("language") or msg.get("locale")
                 if isinstance(lang_in, str) and "-" in lang_in:
                     lang_in = lang_in.split("-")[0].lower()
                 language = lang_in or "en"
                 speed = msg.get("speed", 1.0)
 
+                if synthesis_id is None:
+                    await ws.send_json({"event": "error", "message": "Missing synthesis_id", "synthesis_id": synthesis_id})
+                    continue
+
+                if not text.strip():
+                    await ws.send_json({
+                        "event": "error",
+                        "message": "Text required",
+                        "synthesis_id": synthesis_id,
+                    })
+                    continue
+
+                if speed < MIN_SPEED or speed > MAX_SPEED:
+                    await ws.send_json({
+                        "event": "error",
+                        "message": f"speed must be between {MIN_SPEED} and {MAX_SPEED}",
+                        "synthesis_id": synthesis_id,
+                    })
+                    continue
+
+                if voice not in SUPPORTED_VOICES:
+                    await ws.send_json({
+                        "event": "error",
+                        "message": f"Voice '{voice}' not available",
+                        "synthesis_id": synthesis_id,
+                        "error_code": "INVALID_VOICE",
+                    })
+                    continue
+
                 logger.info(
-                    f"TTS Streaming synthesize: text_length={len(text)}, voice={voice}, language={language}, speed={speed}"
+                    f"TTS Streaming synthesize: synthesis_id={synthesis_id}, text_length={len(text)}, voice={voice}, language={language}, speed={speed}"
                 )
 
                 async def run():
                     nonlocal bytes_generated
                     bytes_generated = 0  # Reset for this synthesis
                     frame_count = 0
+                    import time
+                    start_time = time.time()
+
+                    # Ensure debug writer is running
+                    await _ensure_debug_writer()
+
+                    # Queue metadata for this synthesis
+                    if DEBUG_TTS_RESPONSES:
+                        _queue_tts_debug(
+                            synthesis_id,
+                            -1,  # Metadata marker
+                            b"",
+                            {
+                                "synthesis_id": synthesis_id,
+                                "text": text,
+                                "voice": voice,
+                                "language": language,
+                                "speed": speed,
+                                "timestamp": datetime.now().isoformat(),
+                            }
+                        )
+
                     try:
                         async for pcm in tts_service.stream(
                             text=text,
@@ -107,6 +247,11 @@ async def tts_stream(ws: WebSocket):
                             except Exception as e:
                                 logger.warning(f"TTS failed to send frame {frame_count}: {e}")
                                 break
+
+                            # Queue for debug logging (non-blocking, put_nowait is O(1))
+                            if DEBUG_TTS_RESPONSES:
+                                _queue_tts_debug(synthesis_id, frame_count - 1, pcm)
+
                             if frame_count == 1 or frame_count % 10 == 0:
                                 logger.debug(f"TTS sent frame {frame_count}, {bytes_generated} bytes so far")
 
@@ -115,20 +260,25 @@ async def tts_stream(ws: WebSocket):
                             try:
                                 total_samples = bytes_generated // 2
                                 duration = round(total_samples / float(SAMPLE_RATE), 3)
+                                duration_ms = int(duration * 1000) if duration is not None else None
                             except Exception:
                                 duration = None
+                                duration_ms = None
 
                             logger.info(
-                                f"TTS Streaming done: {frame_count} frames, {bytes_generated} bytes, duration={duration}s"
+                                f"TTS Streaming done: synthesis_id={synthesis_id}, frames={frame_count}, bytes={bytes_generated}, duration={duration}s"
                             )
                             try:
                                 await ws.send_json(
                                     {
                                         "event": "done",
-                                        "duration": duration,
+                                        "synthesis_id": synthesis_id,
+                                        "duration_ms": duration_ms,
                                     }
                                 )
-                                logger.info(f"✅ TTS Streaming done event sent successfully (session_id={session_id}, duration={duration}s)")
+                                logger.info(
+                                    f"✅ TTS Streaming done event sent successfully (session_id={session_id}, synthesis_id={synthesis_id}, duration={duration}s)"
+                                )
                             except Exception as e:
                                 logger.warning(f"TTS failed to send done event: {e}")
                     except Exception as e:
